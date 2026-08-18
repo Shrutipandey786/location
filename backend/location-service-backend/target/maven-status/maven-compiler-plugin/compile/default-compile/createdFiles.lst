@@ -1,0 +1,9 @@
+com\fieldservice\websocket\WebSocketConfig.class
+com\fieldservice\config\SecurityConfig.class
+com\fieldservice\event\package-info.class
+com\fieldservice\device\package-info.class
+com\fieldservice\user\package-info.class
+com\fieldservice\FieldServiceApplication.class
+com\fieldservice\service\package-info.class
+com\fieldservice\message\package-info.class
+com\fieldservice\auth\package-info.class
