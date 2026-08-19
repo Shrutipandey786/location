@@ -16,14 +16,15 @@ class WebSocketService {
   void connect(String userId) {
     if (_stompClient != null && _stompClient!.connected) return;
 
-    String wsUrl = 'ws://172.16.2.18:8080/ws';
+    String wsUrl = 'ws://172.16.2.18:8080/ws/websocket';
     if (kIsWeb) {
-      wsUrl = 'ws://localhost:8080/ws';
+      wsUrl = 'ws://localhost:8080/ws/websocket';
     }
 
     _stompClient = StompClient(
       config: StompConfig(
         url: wsUrl,
+        reconnectDelay: const Duration(seconds: 15),
         onConnect: (StompFrame frame) {
           _isConnected = true;
           debugPrint("WebSocket STOMP connected");
@@ -44,7 +45,6 @@ class WebSocketService {
         },
         onWebSocketError: (dynamic error) {
           _isConnected = false;
-          debugPrint("WebSocket Error: $error");
         },
         onDisconnect: (StompFrame frame) {
           _isConnected = false;

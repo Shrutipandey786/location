@@ -1,11 +1,16 @@
-﻿import 'package:dio/dio.dart';
+import 'package:battery_plus/battery_plus.dart';
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:provider/provider.dart';
 
 import '../models/conversation_summary.dart';
 import '../models/models.dart';
+import '../providers/auth_provider.dart';
+import '../providers/dashboard_provider.dart';
 import '../services/auth_api_service.dart';
+import '../services/deletion_storage_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/map_canvas.dart';
 import 'chat_detail_screen.dart';
@@ -20,15 +25,21 @@ class MapOverviewScreen extends StatefulWidget {
 class _MapOverviewScreenState extends State<MapOverviewScreen> {
   final AuthApiService _apiService = AuthApiService();
   PeerUser? _selectedPeer;
+  bool _isUserSelected = true;
   int _radiusFilterIndex = 2; // 0: 1km, 1: 5km, 2: 20km, 3: Global
   MapType _currentMapType = MapType.normal;
 
   LocationPoint _myLocation = LocationPoint(
     latitude: 28.6139,
     longitude: 77.2090,
-    address: "My Current Position",
+    address: "Acquiring live GPS location...",
     timestamp: DateTime.now(),
   );
+
+  double _gpsAccuracy = 0.0;
+  double _gpsAltitude = 0.0;
+  double _gpsSpeed = 0.0;
+  int _batteryLevel = 95;
 
   List<PeerUser> _peers = [];
   bool _isLoading = true;
@@ -40,6 +51,29 @@ class _MapOverviewScreenState extends State<MapOverviewScreen> {
     _initMapData();
   }
 
+  Future<String> _reverseGeocode(double lat, double lng) async {
+    try {
+      final dio = Dio();
+      dio.options.headers['User-Agent'] = 'location-service-app/1.0';
+      final res = await dio.get(
+        'https://nominatim.openstreetmap.org/reverse',
+        queryParameters: {
+          'format': 'json',
+          'lat': lat,
+          'lon': lng,
+          'zoom': 18,
+          'addressdetails': 1,
+        },
+      );
+      if (res.statusCode == 200 && res.data != null && res.data['display_name'] != null) {
+        return res.data['display_name'].toString();
+      }
+    } catch (e) {
+      debugPrint("Geocoding error: $e");
+    }
+    return "${lat.toStringAsFixed(5)}°, ${lng.toStringAsFixed(5)}°";
+  }
+
   Future<void> _initMapData() async {
     setState(() {
       _isLoading = true;
@@ -47,6 +81,13 @@ class _MapOverviewScreenState extends State<MapOverviewScreen> {
     });
 
     try {
+      try {
+        final battery = Battery();
+        _batteryLevel = await battery.batteryLevel;
+      } catch (e) {
+        debugPrint("Battery check info: $e");
+      }
+
       bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
       if (serviceEnabled) {
         LocationPermission permission = await Geolocator.checkPermission();
@@ -57,17 +98,27 @@ class _MapOverviewScreenState extends State<MapOverviewScreen> {
           Position position = await Geolocator.getCurrentPosition(
             locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
           );
+          _gpsAccuracy = position.accuracy;
+          _gpsAltitude = position.altitude;
+          _gpsSpeed = position.speed;
+
+          final realAddress = await _reverseGeocode(position.latitude, position.longitude);
+
           _myLocation = LocationPoint(
             latitude: position.latitude,
             longitude: position.longitude,
-            address: "${position.latitude.toStringAsFixed(4)}, ${position.longitude.toStringAsFixed(4)}",
+            address: realAddress,
+            altitude: position.altitude,
+            speed: position.speed,
             timestamp: DateTime.now(),
           );
-          _apiService.updateLocation(
+
+          await _apiService.updateLocation(
             latitude: position.latitude,
             longitude: position.longitude,
-            address: _myLocation.address,
+            address: realAddress,
           );
+          await _apiService.updateDeviceStatus(batteryLevel: _batteryLevel);
         }
       }
     } catch (e) {
@@ -80,12 +131,10 @@ class _MapOverviewScreenState extends State<MapOverviewScreen> {
         final listData = response.data as List<dynamic>;
         final summaries = listData
             .map((item) => ConversationSummary.fromJson(item as Map<String, dynamic>))
+            .where((s) => !DeletionStorageService().isPeerCleared(s.peerId))
             .toList();
 
         _peers = summaries.map((s) => s.toPeerUser()).toList();
-        if (_peers.isNotEmpty && _selectedPeer == null) {
-          _selectedPeer = _peers.first;
-        }
       }
       setState(() {
         _isLoading = false;
@@ -127,6 +176,13 @@ class _MapOverviewScreenState extends State<MapOverviewScreen> {
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    final currentUser = Provider.of<AuthProvider>(context).currentUser;
+
+    final userName = currentUser?.name ?? "My Device";
+    final userEmail = currentUser?.email ?? "Live User";
+    final initials = userName.isNotEmpty
+        ? userName.split(" ").map((e) => e.isNotEmpty ? e[0] : "").take(2).join().toUpperCase()
+        : "YOU";
 
     return Scaffold(
       appBar: AppBar(
@@ -141,7 +197,7 @@ class _MapOverviewScreenState extends State<MapOverviewScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
-            tooltip: "Refresh Peer Locations",
+            tooltip: "Refresh Live GPS & Peers",
             onPressed: _initMapData,
           ),
           IconButton(
@@ -190,156 +246,93 @@ class _MapOverviewScreenState extends State<MapOverviewScreen> {
                       peers: _peers,
                       myLocation: _myLocation,
                       mapType: _currentMapType,
-                      onSelectPeer: (peer) {
-                        setState(() => _selectedPeer = peer);
+                      isUserSelected: _isUserSelected,
+                      onSelectUser: () {
+                        setState(() {
+                          _isUserSelected = true;
+                          _selectedPeer = null;
+                        });
                       },
-                      isOverviewMode: true, radiusZoom: _radiusFilterIndex == 0 ? 15.5 : (_radiusFilterIndex == 1 ? 13.5 : (_radiusFilterIndex == 2 ? 11.5 : 5.0)),
+                      onSelectPeer: (peer) {
+                        setState(() {
+                          _isUserSelected = false;
+                          _selectedPeer = peer;
+                        });
+                      },
+                      isOverviewMode: true,
+                      radiusZoom: _radiusFilterIndex == 0 ? 15.5 : (_radiusFilterIndex == 1 ? 13.5 : (_radiusFilterIndex == 2 ? 11.5 : 5.0)),
                     ),
                     Positioned(
                       top: 12,
-                      left: 16,
-                      right: 16,
+                      left: 12,
+                      right: 12,
                       child: SingleChildScrollView(
                         scrollDirection: Axis.horizontal,
                         child: Row(
                           children: [
                             _buildRadiusChip(0, "1 km"),
-                            const SizedBox(width: 8),
+                            const SizedBox(width: 6),
                             _buildRadiusChip(1, "5 km"),
-                            const SizedBox(width: 8),
+                            const SizedBox(width: 6),
                             _buildRadiusChip(2, "20 km"),
-                            const SizedBox(width: 8),
+                            const SizedBox(width: 6),
                             _buildRadiusChip(3, "Global Radius"),
                           ],
                         ),
                       ),
                     ),
-                    if (_peers.isNotEmpty)
-                      Positioned(
-                        bottom: 16,
-                        left: 16,
-                        right: 16,
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                              decoration: BoxDecoration(
-                                color: (isDark ? AppTheme.darkSurface : Colors.white).withOpacity(0.9),
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  const Icon(Icons.people_alt_outlined, size: 14, color: AppTheme.primaryIndigo),
-                                  const SizedBox(width: 6),
-                                  Text(
-                                    "${_peers.length} Connections",
-                                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            SizedBox(
-                              height: 120,
-                              child: ListView.builder(
-                                scrollDirection: Axis.horizontal,
-                                itemCount: _peers.length,
-                                itemBuilder: (context, index) {
-                                  final peer = _peers[index];
-                                  final isSelected = _selectedPeer?.id == peer.id;
-
+                    Positioned(
+                      bottom: 12,
+                      left: 12,
+                      right: 12,
+                      child: SizedBox(
+                        height: 72,
+                        child: ListView.builder(
+                              scrollDirection: Axis.horizontal,
+                              itemCount: 1 + _peers.length,
+                              itemBuilder: (context, index) {
+                                if (index == 0) {
+                                  // User Node ("You")
+                                  final isSelected = _isUserSelected;
                                   return GestureDetector(
-                                    onTap: () => setState(() => _selectedPeer = peer),
+                                    onTap: () {
+                                      setState(() {
+                                        _isUserSelected = true;
+                                        _selectedPeer = null;
+                                      });
+                                    },
                                     child: Container(
-                                      width: 220,
-                                      margin: const EdgeInsets.only(right: 10),
+                                      width: 190,
+                                      margin: const EdgeInsets.only(right: 8),
                                       child: Card(
                                         color: isSelected
-                                            ? AppTheme.primaryViolet.withOpacity(0.9)
+                                            ? AppTheme.primaryIndigo
                                             : (isDark ? AppTheme.darkCard : Colors.white),
                                         child: Padding(
-                                          padding: const EdgeInsets.all(12),
-                                          child: Column(
-                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                                          child: Row(
                                             children: [
-                                              Row(
-                                                children: [
-                                                  CircleAvatar(
-                                                    radius: 16,
-                                                    backgroundColor: Colors.white24,
-                                                    child: Text(
-                                                      peer.avatarInitials,
-                                                      style: TextStyle(
-                                                        color: isSelected ? Colors.white : AppTheme.primaryIndigo,
-                                                        fontWeight: FontWeight.bold,
-                                                        fontSize: 11,
-                                                      ),
-                                                    ),
-                                                  ),
-                                                  const SizedBox(width: 8),
-                                                  Expanded(
-                                                    child: Column(
-                                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                                      children: [
-                                                        Text(
-                                                          peer.name,
-                                                          style: TextStyle(
-                                                            fontWeight: FontWeight.bold,
-                                                            fontSize: 13,
-                                                            color: isSelected ? Colors.white : null,
-                                                          ),
-                                                          maxLines: 1,
-                                                        ),
-                                                        Text(
-                                                          peer.location.formatCoordinates(),
-                                                          style: TextStyle(
-                                                            fontSize: 10,
-                                                            fontFamily: 'monospace',
-                                                            color: isSelected ? Colors.white70 : AppTheme.primaryIndigo,
-                                                          ),
-                                                        ),
-                                                      ],
-                                                    ),
-                                                  ),
-                                                ],
+                                              CircleAvatar(
+                                                radius: 16,
+                                                backgroundColor: isSelected ? Colors.white24 : AppTheme.primaryIndigo.withOpacity(0.15),
+                                                child: Icon(
+                                                  Icons.my_location,
+                                                  size: 16,
+                                                  color: isSelected ? Colors.white : AppTheme.primaryIndigo,
+                                                ),
                                               ),
-                                              const Spacer(),
-                                              Row(
-                                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                                children: [
-                                                  Text(
-                                                    "${peer.isOnline ? "Online" : "Offline"} • ${peer.deviceModel.split(' ').first} (${peer.batteryLevel}%)",
-                                                    style: TextStyle(
-                                                      fontSize: 10,
-                                                      color: isSelected ? Colors.white70 : Colors.grey,
-                                                    ),
+                                              const SizedBox(width: 8),
+                                              Expanded(
+                                                child: Text(
+                                                  userName,
+                                                  style: TextStyle(
+                                                    fontWeight: FontWeight.bold,
+                                                    fontSize: 13,
+                                                    color: isSelected ? Colors.white : null,
                                                   ),
-                                                  InkWell(
-                                                    onTap: () {
-                                                      Navigator.push(
-                                                        context,
-                                                        MaterialPageRoute(
-                                                          builder: (_) => ChatDetailScreen(peer: peer),
-                                                        ),
-                                                      );
-                                                    },
-                                                    child: Container(
-                                                      padding: const EdgeInsets.all(4),
-                                                      decoration: const BoxDecoration(
-                                                        color: Colors.white24,
-                                                        shape: BoxShape.circle,
-                                                      ),
-                                                      child: Icon(
-                                                        Icons.send,
-                                                        size: 12,
-                                                        color: isSelected ? Colors.white : AppTheme.primaryIndigo,
-                                                      ),
-                                                    ),
-                                                  ),
-                                                ],
+                                                  maxLines: 1,
+                                                  overflow: TextOverflow.ellipsis,
+                                                ),
                                               ),
                                             ],
                                           ),
@@ -347,14 +340,235 @@ class _MapOverviewScreenState extends State<MapOverviewScreen> {
                                       ),
                                     ),
                                   );
-                                },
+                                }
+
+                                final peer = _peers[index - 1];
+                                final isSelected = !_isUserSelected && _selectedPeer?.id == peer.id;
+
+                                return GestureDetector(
+                                  onTap: () {
+                                    setState(() {
+                                      _isUserSelected = false;
+                                      _selectedPeer = peer;
+                                    });
+                                  },
+                                  child: Container(
+                                    width: 190,
+                                    margin: const EdgeInsets.only(right: 8),
+                                    child: Card(
+                                      color: isSelected
+                                          ? AppTheme.primaryViolet.withOpacity(0.95)
+                                          : (isDark ? AppTheme.darkCard : Colors.white),
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                                        child: Row(
+                                          children: [
+                                            CircleAvatar(
+                                              radius: 16,
+                                              backgroundColor: isSelected ? Colors.white24 : AppTheme.primaryIndigo.withOpacity(0.12),
+                                              child: Text(
+                                                peer.avatarInitials,
+                                                style: TextStyle(
+                                                  color: isSelected ? Colors.white : AppTheme.primaryIndigo,
+                                                  fontWeight: FontWeight.bold,
+                                                  fontSize: 11,
+                                                ),
+                                              ),
+                                            ),
+                                            const SizedBox(width: 8),
+                                            Expanded(
+                                              child: Text(
+                                                peer.name,
+                                                style: TextStyle(
+                                                  fontWeight: FontWeight.bold,
+                                                  fontSize: 13,
+                                                  color: isSelected ? Colors.white : null,
+                                                ),
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                        ),
+                      ],
+                    )),
+    );
+  }
+
+  Widget _buildUserLocationDetailsCard(bool isDark, String userName, String userEmail, String initials) {
+    return Card(
+      elevation: 6,
+      color: (isDark ? AppTheme.darkCard : Colors.white).withOpacity(0.96),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Row(
+          children: [
+            CircleAvatar(
+              radius: 20,
+              backgroundColor: AppTheme.primaryIndigo,
+              child: Text(
+                initials,
+                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    userName,
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                  ),
+                  if (userEmail.isNotEmpty) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      userEmail,
+                      style: TextStyle(fontSize: 11, color: isDark ? Colors.grey.shade400 : Colors.grey.shade600),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPeerLocationDetailsCard(bool isDark, PeerUser peer) {
+    return Card(
+      elevation: 6,
+      color: (isDark ? AppTheme.darkCard : Colors.white).withOpacity(0.96),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                CircleAvatar(
+                  radius: 20,
+                  backgroundColor: AppTheme.primaryViolet,
+                  child: Text(
+                    peer.avatarInitials,
+                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            peer.name,
+                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                          ),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: peer.isOnline ? AppTheme.statusGreen.withOpacity(0.18) : Colors.grey.withOpacity(0.18),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text(
+                              peer.isOnline ? "ONLINE" : "OFFLINE",
+                              style: TextStyle(
+                                color: peer.isOnline ? AppTheme.statusGreen : Colors.grey,
+                                fontSize: 10,
+                                fontWeight: FontWeight.bold,
                               ),
                             ),
-                          ],
-                        ),
+                          ),
+                        ],
                       ),
-                  ],
-                )),
+                      const SizedBox(height: 2),
+                      Text(
+                        peer.email,
+                        style: TextStyle(fontSize: 11, color: isDark ? Colors.grey.shade400 : Colors.grey.shade600),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            const Divider(height: 1),
+            const SizedBox(height: 10),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  "LAT/LNG: ${peer.location.formatCoordinates()}",
+                  style: const TextStyle(fontSize: 11, fontFamily: 'monospace', fontWeight: FontWeight.bold, color: AppTheme.primaryIndigo),
+                ),
+                Text(
+                  "Battery: ${peer.batteryLevel}%",
+                  style: const TextStyle(fontSize: 11, color: Colors.grey),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              "📍 Address: ${peer.location.address}",
+              style: TextStyle(fontSize: 11, color: isDark ? Colors.grey.shade300 : Colors.black87),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppTheme.primaryIndigo,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (_) => ChatDetailScreen(peer: peer)),
+                      );
+                    },
+                    icon: const Icon(Icons.send, size: 16, color: Colors.white),
+                    label: const Text("Message", style: TextStyle(color: Colors.white)),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTelemetryItem(String label, String value) {
+    return Column(
+      children: [
+        Text(
+          label,
+          style: const TextStyle(fontSize: 9, color: Colors.grey, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          value,
+          style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
+        ),
+      ],
     );
   }
 

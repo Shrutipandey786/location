@@ -115,6 +115,23 @@ class ChatMessage {
         address: json['address']?.toString() ?? 'Location Pin',
         timestamp: DateTime.tryParse(json['createdAt']?.toString() ?? '') ?? DateTime.now(),
       );
+    } else if (json['location'] != null && json['location'] is Map) {
+      final locMap = json['location'] as Map<String, dynamic>;
+      if (locMap['latitude'] != null && locMap['longitude'] != null) {
+        locPoint = LocationPoint(
+          latitude: (locMap['latitude'] as num).toDouble(),
+          longitude: (locMap['longitude'] as num).toDouble(),
+          address: locMap['address']?.toString() ?? 'Location Pin',
+          timestamp: DateTime.tryParse(json['createdAt']?.toString() ?? '') ?? DateTime.now(),
+        );
+      }
+    } else if (isMe) {
+      locPoint = LocationPoint(
+        latitude: 28.6139,
+        longitude: 77.2090,
+        address: 'Current Position',
+        timestamp: DateTime.now(),
+      );
     }
 
     return ChatMessage(

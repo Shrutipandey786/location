@@ -8,11 +8,13 @@ import 'ptt_button.dart';
 class LocationMessageBubble extends StatefulWidget {
   final ChatMessage message;
   final bool isMe;
+  final VoidCallback? onDelete;
 
   const LocationMessageBubble({
     super.key,
     required this.message,
     required this.isMe,
+    this.onDelete,
   });
 
   @override
@@ -133,10 +135,12 @@ class _LocationMessageBubbleState extends State<LocationMessageBubble> {
               ),
             ),
 
-          Container(
-            constraints: BoxConstraints(
-              maxWidth: MediaQuery.of(context).size.width * 0.80,
-            ),
+          GestureDetector(
+            onLongPress: widget.onDelete,
+            child: Container(
+              constraints: BoxConstraints(
+                maxWidth: MediaQuery.of(context).size.width * 0.80,
+              ),
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
             decoration: BoxDecoration(
               color: bubbleBg,
@@ -300,6 +304,7 @@ class _LocationMessageBubbleState extends State<LocationMessageBubble> {
               ],
             ),
           ),
+        ),
         ],
       ),
     );

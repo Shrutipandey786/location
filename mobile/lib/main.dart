@@ -5,9 +5,12 @@ import "providers/auth_provider.dart";
 import "providers/conversation_provider.dart";
 import "providers/dashboard_provider.dart";
 import "screens/splash_screen.dart";
+import "services/deletion_storage_service.dart";
 import "theme/app_theme.dart";
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await DeletionStorageService().init();
   runApp(
     MultiProvider(
       providers: [

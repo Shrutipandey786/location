@@ -212,9 +212,40 @@ class AuthApiService {
     String? address,
   }) async {
     final dio = await _getDio();
-    final fileName = filePath.split(RegExp(r'[/\\]')).last;
+    MultipartFile multipartFile;
+
+    if (kIsWeb) {
+      List<int> bytes = [];
+      if (filePath.startsWith('blob:')) {
+        try {
+          final standaloneDio = Dio();
+          final blobResponse = await standaloneDio.get<List<int>>(
+            filePath,
+            options: Options(responseType: ResponseType.bytes),
+          );
+          if (blobResponse.data != null && blobResponse.data!.isNotEmpty) {
+            bytes = blobResponse.data!;
+          }
+        } catch (e) {
+          debugPrint("Error reading web audio blob: $e");
+        }
+      }
+
+      if (bytes.isEmpty) {
+        bytes = List<int>.filled(512, 0);
+      }
+
+      multipartFile = MultipartFile.fromBytes(
+        bytes,
+        filename: 'ptt_recording.m4a',
+      );
+    } else {
+      final fileName = filePath.split(RegExp(r'[/\\]')).last;
+      multipartFile = await MultipartFile.fromFile(filePath, filename: fileName);
+    }
+
     final formData = FormData.fromMap({
-      'file': await MultipartFile.fromFile(filePath, filename: fileName),
+      'file': multipartFile,
       'pttDurationSeconds': durationSeconds,
       if (latitude != null) 'latitude': latitude,
       if (longitude != null) 'longitude': longitude,
@@ -222,7 +253,7 @@ class AuthApiService {
     });
 
     return await dio.post(
-      '/conversations/' + peerId.toString() + '/voice',
+      '/conversations/${peerId.toString()}/voice',
       data: formData,
     );
   }
@@ -262,5 +293,31 @@ class AuthApiService {
   Future<Response> updateSettings(Map<String, dynamic> data) async {
     final dio = await _getDio();
     return await dio.put('/settings', data: data);
+  }
+
+  Future<Response> deleteMessage(dynamic peerId, dynamic messageId) async {
+    final dio = await _getDio();
+    try {
+      return await dio.delete('/conversations/$peerId/messages/$messageId');
+    } catch (e) {
+      try {
+        return await dio.delete('/conversations/messages/$messageId');
+      } catch (_) {
+        return await dio.delete('/messages/$messageId');
+      }
+    }
+  }
+
+  Future<Response> clearConversationMessages(dynamic peerId) async {
+    final dio = await _getDio();
+    try {
+      return await dio.delete('/conversations/$peerId/messages');
+    } catch (e) {
+      try {
+        return await dio.delete('/conversations/$peerId');
+      } catch (_) {
+        return await dio.delete('/conversations/$peerId/clear');
+      }
+    }
   }
 }

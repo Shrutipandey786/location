@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'package:audioplayers/audioplayers.dart';
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:path_provider/path_provider.dart';
@@ -10,6 +12,8 @@ import '../models/conversation_summary.dart';
 import '../models/models.dart';
 import '../providers/auth_provider.dart';
 import '../services/auth_api_service.dart';
+import '../services/deletion_storage_service.dart';
+import '../services/websocket_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/ptt_button.dart';
 
@@ -26,18 +30,27 @@ class PushToTalkScreen extends StatefulWidget {
 }
 
 class _PushToTalkScreenState extends State<PushToTalkScreen> {
+  static final Set<String> _deletedPttMessageIds = {};
+
   final AuthApiService _apiService = AuthApiService();
+  final WebSocketService _webSocketService = WebSocketService();
   final AudioRecorder _audioRecorder = AudioRecorder();
+  final AudioPlayer _audioPlayer = AudioPlayer();
 
   List<PeerUser> _peers = [];
   PeerUser? _activeChannelPeer;
+  List<ChatMessage> _voiceStreamMessages = [];
 
   bool _isLoading = true;
+  bool _isLoadingStream = false;
   String? _errorMessage;
 
   bool _isChannelBroadcasting = false;
   bool _isTransmitting = false;
   bool _isUploading = false;
+  bool _isPlayingAudio = false;
+  String? _playingAudioId;
+  String? _currentUserId;
 
   Timer? _timer;
   int _recordedSeconds = 0;
@@ -46,13 +59,68 @@ class _PushToTalkScreenState extends State<PushToTalkScreen> {
   @override
   void initState() {
     super.initState();
+    _setupAudioPlayer();
     _loadPeersFromBackend();
+    _setupWebSocket();
+  }
+
+  void _setupAudioPlayer() {
+    _audioPlayer.onPlayerComplete.listen((_) {
+      if (mounted) {
+        setState(() {
+          _isPlayingAudio = false;
+          _playingAudioId = null;
+        });
+      }
+    });
+  }
+
+  void _setupWebSocket() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final authProvider = context.read<AuthProvider>();
+      final user = authProvider.currentUser;
+      if (user != null && user.id != null) {
+        _currentUserId = user.id.toString();
+        _webSocketService.connect(_currentUserId!);
+        _webSocketService.addMessageListener(_currentUserId!, _onWebSocketMessageReceived);
+      }
+    });
+  }
+
+  void _onWebSocketMessageReceived(Map<String, dynamic> json) {
+    if (!mounted || _currentUserId == null) return;
+
+    final senderIdStr = json['senderId']?.toString() ?? '';
+    final recipientIdStr = json['recipientId']?.toString() ?? '';
+
+    if (_activeChannelPeer != null &&
+        (senderIdStr == _activeChannelPeer!.id || recipientIdStr == _activeChannelPeer!.id)) {
+      final newMsg = ChatMessage.fromJson(json, _currentUserId!);
+      if (newMsg.type == MessageType.pttVoice) {
+        setState(() {
+          final existingIndex = _voiceStreamMessages.indexWhere((m) => m.id == newMsg.id && newMsg.id.isNotEmpty);
+          if (existingIndex == -1) {
+            _voiceStreamMessages.add(newMsg);
+          } else {
+            _voiceStreamMessages[existingIndex] = newMsg;
+          }
+        });
+
+        if (_isChannelBroadcasting && senderIdStr != _currentUserId && newMsg.audioUrl != null) {
+          _playAudioMessage(newMsg);
+        }
+      }
+    }
   }
 
   @override
   void dispose() {
+    if (_currentUserId != null) {
+      _webSocketService.removeMessageListener(_currentUserId!, _onWebSocketMessageReceived);
+    }
     _timer?.cancel();
     _audioRecorder.dispose();
+    _audioPlayer.dispose();
     super.dispose();
   }
 
@@ -68,6 +136,7 @@ class _PushToTalkScreenState extends State<PushToTalkScreen> {
         final listData = response.data as List<dynamic>;
         final summaries = listData
             .map((item) => ConversationSummary.fromJson(item as Map<String, dynamic>))
+            .where((s) => !DeletionStorageService().isPeerCleared(s.peerId))
             .toList();
 
         _peers = summaries.map((s) => s.toPeerUser()).toList();
@@ -85,6 +154,7 @@ class _PushToTalkScreenState extends State<PushToTalkScreen> {
         } else {
           _activeChannelPeer = _peers.first;
         }
+        await _loadChannelStream(_activeChannelPeer!.id);
       }
 
       setState(() {
@@ -105,13 +175,100 @@ class _PushToTalkScreenState extends State<PushToTalkScreen> {
     }
   }
 
+  Future<void> _loadChannelStream(String peerId) async {
+    setState(() {
+      _isLoadingStream = true;
+    });
+
+    try {
+      final authProvider = context.read<AuthProvider>();
+      _currentUserId = authProvider.currentUser?.id?.toString() ?? '';
+
+      final response = await _apiService.getConversationDetail(peerId);
+      if (response.data != null && response.data is Map<String, dynamic>) {
+        final data = response.data as Map<String, dynamic>;
+        final msgsJson = data['messages'] as List<dynamic>? ?? [];
+
+        final allMsgs = msgsJson
+            .map((m) => ChatMessage.fromJson(m as Map<String, dynamic>, _currentUserId!))
+            .toList();
+
+        setState(() {
+          _voiceStreamMessages = allMsgs.where((m) => m.type == MessageType.pttVoice && !DeletionStorageService().isMessageDeleted(m.id)).toList();
+        });
+      }
+    } catch (e) {
+      debugPrint("Error loading PTT stream: $e");
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoadingStream = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _playAudioMessage(ChatMessage message) async {
+    final audioPath = message.audioUrl;
+    if (audioPath == null || audioPath.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("No audio file available for this voice memo.")),
+      );
+      return;
+    }
+
+    if (_isPlayingAudio && _playingAudioId == message.id) {
+      await _audioPlayer.pause();
+      setState(() {
+        _isPlayingAudio = false;
+        _playingAudioId = null;
+      });
+      return;
+    }
+
+    try {
+      String fullUrl = audioPath;
+      if (audioPath.startsWith("/")) {
+        String baseUrl = await _apiService.getBaseUrl();
+        if (baseUrl.endsWith("/api")) {
+          baseUrl = baseUrl.substring(0, baseUrl.length - 4);
+        } else if (baseUrl.endsWith("/api/")) {
+          baseUrl = baseUrl.substring(0, baseUrl.length - 5);
+        }
+        fullUrl = "$baseUrl$audioPath";
+      }
+
+      await _audioPlayer.play(UrlSource(fullUrl));
+      if (mounted) {
+        setState(() {
+          _isPlayingAudio = true;
+          _playingAudioId = message.id;
+        });
+      }
+    } catch (e) {
+      debugPrint("PTT Playback error: $e");
+      if (mounted) {
+        setState(() {
+          _isPlayingAudio = false;
+          _playingAudioId = null;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Playback error: $e")),
+        );
+      }
+    }
+  }
+
   Future<void> _startRecording() async {
     if (_activeChannelPeer == null) return;
 
     try {
       if (await _audioRecorder.hasPermission()) {
-        final tempDir = await getTemporaryDirectory();
-        final path = '${tempDir.path}/ptt_${DateTime.now().millisecondsSinceEpoch}.m4a';
+        String path = '';
+        if (!kIsWeb) {
+          final tempDir = await getTemporaryDirectory();
+          path = '${tempDir.path}/ptt_${DateTime.now().millisecondsSinceEpoch}.m4a';
+        }
 
         await _audioRecorder.start(
           const RecordConfig(encoder: AudioEncoder.aacLc),
@@ -184,7 +341,7 @@ class _PushToTalkScreenState extends State<PushToTalkScreen> {
           debugPrint("GPS location check error: $e");
         }
 
-        await _apiService.sendVoiceMessage(
+        final response = await _apiService.sendVoiceMessage(
           _activeChannelPeer!.id,
           path,
           duration,
@@ -192,6 +349,15 @@ class _PushToTalkScreenState extends State<PushToTalkScreen> {
           longitude: lng,
           address: address,
         );
+
+        if (response.data != null && response.data is Map<String, dynamic>) {
+          final newMsg = ChatMessage.fromJson(response.data as Map<String, dynamic>, _currentUserId ?? '');
+          setState(() {
+            _voiceStreamMessages.add(newMsg);
+          });
+        } else {
+          _loadChannelStream(_activeChannelPeer!.id);
+        }
 
         if (mounted) {
           setState(() {
@@ -223,6 +389,145 @@ class _PushToTalkScreenState extends State<PushToTalkScreen> {
     } finally {
       _recordingPath = null;
     }
+  }
+
+  Future<void> _confirmDeleteVoiceStream(ChatMessage msg) async {
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Delete Voice Memo"),
+        content: const Text("Are you sure you want to delete this voice memo stream?"),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("Cancel"),
+          ),
+          TextButton(
+            style: TextButton.styleFrom(foregroundColor: AppTheme.statusRed),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Delete"),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      if (msg.id.isNotEmpty) {
+        await DeletionStorageService().addDeletedMessage(msg.id);
+      }
+      try {
+        await _apiService.deleteMessage(_activeChannelPeer?.id ?? '', msg.id);
+      } catch (e) {
+        debugPrint("API delete voice memo error: $e");
+      }
+      setState(() {
+        _voiceStreamMessages.removeWhere((m) => m.id == msg.id);
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("Voice memo stream deleted"),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    }
+  }
+
+  Widget _buildVoiceStreamCard(ChatMessage msg, bool isDark) {
+    final bool isPlayingThis = _isPlayingAudio && _playingAudioId == msg.id;
+    final bool isMe = msg.senderId == "user_me" || msg.senderId == _currentUserId;
+
+    return GestureDetector(
+      onLongPress: () => _confirmDeleteVoiceStream(msg),
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: isMe
+              ? AppTheme.primaryIndigo
+              : (isDark ? AppTheme.darkSurface : Colors.indigo.shade50),
+          borderRadius: BorderRadius.circular(16),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.04),
+              blurRadius: 4,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+              GestureDetector(
+                onTap: () => _playAudioMessage(msg),
+                child: Container(
+                  width: 36,
+                  height: 36,
+                  decoration: const BoxDecoration(
+                    color: Colors.white,
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    isPlayingThis ? Icons.pause : Icons.play_arrow,
+                    color: AppTheme.primaryIndigo,
+                    size: 22,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      "Voice memo stream (${(msg.pttDurationSeconds ?? 3).toString().padLeft(2, '0')}s)",
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 13,
+                        color: isMe ? Colors.white : (isDark ? Colors.white : AppTheme.textPrimary),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Row(
+                      children: [
+                        Text(
+                          "${msg.deviceModel} • ${msg.batteryLevel}% • ${msg.formattedTime}",
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: isMe ? Colors.white70 : AppTheme.textSecondary,
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        if (isMe)
+                          const Icon(Icons.done_all, size: 12, color: Colors.white70),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              AudioWaveformPainter(
+                values: msg.audioWaveform ?? [0.4, 0.8, 0.5, 0.9, 0.3, 0.7, 0.4, 0.6],
+                color: isMe ? Colors.white : AppTheme.primaryIndigo,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                "${msg.pttDurationSeconds ?? 3}s",
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                  color: isMe ? Colors.white : AppTheme.primaryIndigo,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    ),
+  );
   }
 
   @override
@@ -362,7 +667,10 @@ class _PushToTalkScreenState extends State<PushToTalkScreen> {
                                             child: ChoiceChip(
                                               label: Text(peer.name),
                                               selected: isSel,
-                                              onSelected: (_) => setState(() => _activeChannelPeer = peer),
+                                              onSelected: (_) {
+                                                setState(() => _activeChannelPeer = peer);
+                                                _loadChannelStream(peer.id);
+                                              },
                                             ),
                                           );
                                         }).toList(),
@@ -374,7 +682,33 @@ class _PushToTalkScreenState extends State<PushToTalkScreen> {
                             ),
                           ),
 
-                          const Spacer(),
+                          // Live PTT Voice Stream Feed from Backend
+                          Expanded(
+                            child: _isLoadingStream
+                                ? const Center(
+                                    child: CircularProgressIndicator(color: AppTheme.primaryIndigo, strokeWidth: 2),
+                                  )
+                                : (_voiceStreamMessages.isEmpty
+                                    ? Center(
+                                        child: Text(
+                                          "No live voice stream recordings for CH 04 yet.",
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            color: isDark ? Colors.grey.shade400 : Colors.grey.shade600,
+                                          ),
+                                        ),
+                                      )
+                                    : ListView.builder(
+                                        padding: const EdgeInsets.symmetric(vertical: 4),
+                                        itemCount: _voiceStreamMessages.length,
+                                        itemBuilder: (context, index) {
+                                          final msg = _voiceStreamMessages[index];
+                                          return _buildVoiceStreamCard(msg, isDark);
+                                        },
+                                      )),
+                          ),
+
+                          const SizedBox(height: 8),
 
                           // Voice Status Banner & Soundwave
                           Padding(
@@ -428,7 +762,7 @@ class _PushToTalkScreenState extends State<PushToTalkScreen> {
                                     ],
                                   ),
                                 ),
-                                const SizedBox(height: 24),
+                                const SizedBox(height: 16),
 
                                 // Equalizer Waveform Animation
                                 AudioWaveformPainter(
@@ -441,7 +775,7 @@ class _PushToTalkScreenState extends State<PushToTalkScreen> {
                             ),
                           ),
 
-                          const Spacer(),
+                          const SizedBox(height: 12),
 
                           // Main Push-To-Talk Button
                           PushToTalkButton(
@@ -454,18 +788,18 @@ class _PushToTalkScreenState extends State<PushToTalkScreen> {
                             },
                           ),
 
-                          const SizedBox(height: 16),
+                          const SizedBox(height: 12),
                           Text(
                             "Press & Hold button to stream live voice memo\nGPS Lat/Long tagged to voice frame automatically",
                             textAlign: TextAlign.center,
                             style: TextStyle(fontSize: 11, color: isDark ? Colors.grey.shade400 : Colors.grey.shade600),
                           ),
 
-                          const Spacer(),
+                          const SizedBox(height: 8),
 
                           // Channel Participants Footer Card
                           Container(
-                            margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                            margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
                             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                             decoration: BoxDecoration(
                               color: isDark ? AppTheme.darkSurface : Colors.grey.shade100,

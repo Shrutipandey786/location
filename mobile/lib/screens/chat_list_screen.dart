@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../models/conversation_summary.dart';
 import '../models/models.dart';
 import '../providers/conversation_provider.dart';
+import '../services/deletion_storage_service.dart';
 import '../theme/app_theme.dart';
 import 'chat_detail_screen.dart';
 
@@ -197,6 +198,11 @@ class _ChatListScreenState extends State<ChatListScreen> {
                         msgIcon = Icons.chat_bubble_outline;
                       }
 
+                      final isCleared = DeletionStorageService().isPeerCleared(item.peerId);
+                      final displayLastMsg = isCleared ? "No messages" : (item.lastMessageText.isNotEmpty ? item.lastMessageText : "No messages");
+                      final displayTime = isCleared ? "" : item.formattedTime;
+                      final effectiveMsgIcon = isCleared ? Icons.chat_bubble_outline : msgIcon;
+
                       return Card(
                         margin: const EdgeInsets.only(bottom: 10),
                         child: ListTile(
@@ -207,7 +213,9 @@ class _ChatListScreenState extends State<ChatListScreen> {
                               MaterialPageRoute(
                                 builder: (_) => ChatDetailScreen(peer: item.toPeerUser()),
                               ),
-                            );
+                            ).then((_) {
+                              if (mounted) setState(() {});
+                            });
                           },
                           leading: Stack(
                             children: [
@@ -248,7 +256,7 @@ class _ChatListScreenState extends State<ChatListScreen> {
                                 style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
                               ),
                               Text(
-                                item.formattedTime,
+                                displayTime,
                                 style: const TextStyle(fontSize: 11, color: Colors.grey),
                               ),
                             ],
@@ -261,14 +269,14 @@ class _ChatListScreenState extends State<ChatListScreen> {
                                 Row(
                                   children: [
                                     Icon(
-                                      msgIcon,
+                                      effectiveMsgIcon,
                                       size: 14,
                                       color: AppTheme.primaryIndigo,
                                     ),
                                     const SizedBox(width: 4),
                                     Expanded(
                                       child: Text(
-                                        item.lastMessageText,
+                                        displayLastMsg,
                                         style: TextStyle(
                                           fontSize: 13,
                                           color: isDark ? Colors.grey.shade300 : Colors.grey.shade700,
@@ -281,7 +289,7 @@ class _ChatListScreenState extends State<ChatListScreen> {
                                 ),
                                 const SizedBox(height: 2),
                                 Text(
-                                  "${item.formatCoordinates()} • ${item.deviceModel}",
+                                  "${item.formatCoordinates()} â€¢ ${item.deviceModel}",
                                   style: const TextStyle(fontSize: 10, color: Colors.grey, fontFamily: 'monospace'),
                                 ),
                               ],
@@ -313,3 +321,4 @@ class _ChatListScreenState extends State<ChatListScreen> {
     );
   }
 }
+

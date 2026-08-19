@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart' show MapType;
 import 'package:latlong2/latlong.dart' as ll;
@@ -11,9 +11,11 @@ class InteractiveMapCanvas extends StatefulWidget {
   final List<PeerUser> peers;
   final LocationPoint myLocation;
   final ValueChanged<PeerUser>? onSelectPeer;
+  final VoidCallback? onSelectUser;
   final bool isOverviewMode;
   final MapType mapType;
   final double? radiusZoom;
+  final bool isUserSelected;
 
   const InteractiveMapCanvas({
     super.key,
@@ -21,9 +23,11 @@ class InteractiveMapCanvas extends StatefulWidget {
     required this.peers,
     required this.myLocation,
     this.onSelectPeer,
+    this.onSelectUser,
     this.isOverviewMode = false,
     this.mapType = MapType.normal,
     this.radiusZoom,
+    this.isUserSelected = false,
   });
 
   @override
@@ -53,16 +57,21 @@ class _InteractiveMapCanvasState extends State<InteractiveMapCanvas> with Single
   void didUpdateWidget(covariant InteractiveMapCanvas oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.radiusZoom != oldWidget.radiusZoom && widget.radiusZoom != null) {
-      final double centerLat = widget.selectedPeer?.location.latitude ?? widget.myLocation.latitude;
-      final double centerLng = widget.selectedPeer?.location.longitude ?? widget.myLocation.longitude;
+      final double centerLat = widget.isUserSelected ? widget.myLocation.latitude : (widget.selectedPeer?.location.latitude ?? widget.myLocation.latitude);
+      final double centerLng = widget.isUserSelected ? widget.myLocation.longitude : (widget.selectedPeer?.location.longitude ?? widget.myLocation.longitude);
       _mapController.move(ll.LatLng(centerLat, centerLng), widget.radiusZoom!);
+    } else if (widget.isUserSelected && !oldWidget.isUserSelected) {
+      _mapController.move(
+        ll.LatLng(widget.myLocation.latitude, widget.myLocation.longitude),
+        15.5,
+      );
     } else if (widget.selectedPeer != oldWidget.selectedPeer && widget.selectedPeer != null) {
       _mapController.move(
         ll.LatLng(
           widget.selectedPeer!.location.latitude,
           widget.selectedPeer!.location.longitude,
         ),
-        15.0,
+        15.5,
       );
     }
   }
@@ -78,9 +87,12 @@ class _InteractiveMapCanvasState extends State<InteractiveMapCanvas> with Single
   }
 
   void _recenterToUser() {
+    if (widget.onSelectUser != null) {
+      widget.onSelectUser!();
+    }
     _mapController.move(
       ll.LatLng(widget.myLocation.latitude, widget.myLocation.longitude),
-      15.0,
+      15.5,
     );
   }
 
@@ -111,54 +123,68 @@ class _InteractiveMapCanvasState extends State<InteractiveMapCanvas> with Single
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
-    final double centerLat = widget.selectedPeer?.location.latitude ?? widget.myLocation.latitude;
-    final double centerLng = widget.selectedPeer?.location.longitude ?? widget.myLocation.longitude;
+    final double centerLat = widget.isUserSelected
+        ? widget.myLocation.latitude
+        : (widget.selectedPeer?.location.latitude ?? widget.myLocation.latitude);
+    final double centerLng = widget.isUserSelected
+        ? widget.myLocation.longitude
+        : (widget.selectedPeer?.location.longitude ?? widget.myLocation.longitude);
 
     final List<Marker> markers = [];
 
-    // 1. Current User Marker (You) with Animated Pulse Ring
+    // 1. Current User Marker (You) with Animated Pulse Ring & Selection Glow
     markers.add(
       Marker(
         point: ll.LatLng(widget.myLocation.latitude, widget.myLocation.longitude),
-        width: 64,
-        height: 64,
+        width: 72,
+        height: 72,
         child: GestureDetector(
           onTap: () {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text("My Device (You) - Live GPS Active"), duration: Duration(seconds: 1)),
-            );
+            if (widget.onSelectUser != null) {
+              widget.onSelectUser!();
+            } else {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text("My Device (You) - Live GPS Active"), duration: Duration(seconds: 1)),
+              );
+            }
           },
           child: AnimatedBuilder(
             animation: _pulseController,
             builder: (context, child) {
               final scale = 1.0 + (_pulseController.value * 0.35);
               final opacity = (1.0 - _pulseController.value).clamp(0.1, 0.4);
+              final isUserActive = widget.isUserSelected;
+
               return Stack(
                 alignment: Alignment.center,
                 children: [
                   Transform.scale(
                     scale: scale,
                     child: Container(
-                      width: 54,
-                      height: 54,
+                      width: 60,
+                      height: 60,
                       decoration: BoxDecoration(
-                        color: AppTheme.primaryIndigo.withOpacity(opacity),
+                        color: (isUserActive ? AppTheme.statusGreen : AppTheme.primaryIndigo).withOpacity(opacity),
                         shape: BoxShape.circle,
                       ),
                     ),
                   ),
                   Container(
-                    width: 36,
-                    height: 36,
+                    width: 40,
+                    height: 40,
                     decoration: BoxDecoration(
-                      color: AppTheme.primaryIndigo,
+                      color: isUserActive ? AppTheme.statusGreen : AppTheme.primaryIndigo,
                       shape: BoxShape.circle,
-                      border: Border.all(color: Colors.white, width: 2.5),
-                      boxShadow: const [
-                        BoxShadow(color: Colors.black38, blurRadius: 8, offset: Offset(0, 3)),
+                      border: Border.all(color: Colors.white, width: 3.0),
+                      boxShadow: [
+                        BoxShadow(
+                          color: isUserActive ? AppTheme.statusGreen.withOpacity(0.5) : Colors.black38,
+                          blurRadius: isUserActive ? 12 : 8,
+                          offset: const Offset(0, 3),
+                        ),
                       ],
                     ),
-                    child: const Icon(Icons.my_location, color: Colors.white, size: 18),
+                    child: const Icon(Icons.my_location, color: Colors.white, size: 20),
                   ),
                 ],
               );
@@ -170,7 +196,7 @@ class _InteractiveMapCanvasState extends State<InteractiveMapCanvas> with Single
 
     // 2. Connected Peer Markers from PostgreSQL
     for (final peer in widget.peers) {
-      final isSelected = widget.selectedPeer?.id == peer.id;
+      final isSelected = !widget.isUserSelected && widget.selectedPeer?.id == peer.id;
 
       markers.add(
         Marker(
@@ -274,6 +300,17 @@ class _InteractiveMapCanvasState extends State<InteractiveMapCanvas> with Single
                 subdomains: const ['mt0', 'mt1', 'mt2', 'mt3'],
                 userAgentPackageName: 'com.locationservice.tracker',
               ),
+            CircleLayer(
+              circles: [
+                CircleMarker(
+                  point: ll.LatLng(widget.myLocation.latitude, widget.myLocation.longitude),
+                  color: AppTheme.primaryIndigo.withOpacity(0.08),
+                  borderColor: AppTheme.primaryIndigo.withOpacity(0.4),
+                  borderStrokeWidth: 1.5,
+                  radius: 80.0,
+                ),
+              ],
+            ),
             MarkerLayer(markers: markers),
           ],
         ),
@@ -300,7 +337,7 @@ class _InteractiveMapCanvasState extends State<InteractiveMapCanvas> with Single
               const SizedBox(height: 14),
               FloatingActionButton.small(
                 heroTag: 'map_recenter_gps',
-                backgroundColor: AppTheme.primaryIndigo,
+                backgroundColor: widget.isUserSelected ? AppTheme.statusGreen : AppTheme.primaryIndigo,
                 foregroundColor: Colors.white,
                 onPressed: _recenterToUser,
                 child: const Icon(Icons.gps_fixed, size: 18),

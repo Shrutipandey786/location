@@ -1,11 +1,13 @@
-import 'package:dio/dio.dart';
+﻿import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:provider/provider.dart';
 
 import '../models/models.dart';
 import '../providers/auth_provider.dart';
+import '../providers/conversation_provider.dart';
 import '../services/auth_api_service.dart';
+import '../services/deletion_storage_service.dart';
 import '../services/websocket_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/location_message_bubble.dart';
@@ -14,6 +16,9 @@ import 'live_location_map_screen.dart';
 import 'push_to_talk_screen.dart';
 
 class ChatDetailScreen extends StatefulWidget {
+  static final Set<String> clearedPeerIds = {};
+  static final Set<String> deletedMessageIds = {};
+
   final PeerUser peer;
 
   const ChatDetailScreen({
@@ -26,6 +31,7 @@ class ChatDetailScreen extends StatefulWidget {
 }
 
 class _ChatDetailScreenState extends State<ChatDetailScreen> {
+
   final AuthApiService _apiService = AuthApiService();
   final WebSocketService _webSocketService = WebSocketService();
   late PeerUser _currentPeer;
@@ -126,10 +132,15 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
           );
         }
 
-        final msgsJson = data['messages'] as List<dynamic>? ?? [];
-        _messages = msgsJson
-            .map((m) => ChatMessage.fromJson(m as Map<String, dynamic>, _currentUserId!))
-            .toList();
+        if (DeletionStorageService().isPeerCleared(_currentPeer.id)) {
+          _messages = [];
+        } else {
+          final msgsJson = data['messages'] as List<dynamic>? ?? [];
+          _messages = msgsJson
+              .map((m) => ChatMessage.fromJson(m as Map<String, dynamic>, _currentUserId!))
+              .where((m) => !DeletionStorageService().isMessageDeleted(m.id))
+              .toList();
+        }
 
         _apiService.markConversationAsRead(_currentPeer.id);
       }
@@ -166,6 +177,95 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     });
   }
 
+  Future<void> _confirmDeleteMessage(ChatMessage msg) async {
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Delete Message"),
+        content: const Text("Are you sure you want to delete this message?"),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("Cancel"),
+          ),
+          TextButton(
+            style: TextButton.styleFrom(foregroundColor: AppTheme.statusRed),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Delete"),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      if (msg.id.isNotEmpty) {
+        await DeletionStorageService().addDeletedMessage(msg.id);
+      }
+      try {
+        await _apiService.deleteMessage(_currentPeer.id, msg.id);
+      } catch (e) {
+        debugPrint("API delete error: $e");
+      }
+      setState(() {
+        _messages.removeWhere((m) => m.id == msg.id);
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("Message deleted"),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _confirmClearConversation() async {
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Clear Conversation"),
+        content: const Text("Are you sure you want to clear all messages in this conversation?"),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("Cancel"),
+          ),
+          TextButton(
+            style: TextButton.styleFrom(foregroundColor: AppTheme.statusRed),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Clear All"),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      await DeletionStorageService().addClearedPeer(_currentPeer.id);
+      try {
+        await _apiService.clearConversationMessages(_currentPeer.id);
+      } catch (e) {
+        debugPrint("API clear error: $e");
+      }
+      try {
+        if (mounted) {
+          context.read<ConversationProvider>().fetchConversations();
+        }
+      } catch (_) {}
+      setState(() {
+        _messages.clear();
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("Conversation messages cleared"),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    }
+  }
+
   Future<void> _sendMessage({
     String? customText,
     MessageType type = MessageType.text,
@@ -178,34 +278,30 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
 
     if (customText == null) _inputController.clear();
 
+    double lat = 28.6139;
+    double lng = 77.2090;
+    String address = 'Live Location Pin';
+
+    try {
+      if (await Geolocator.isLocationServiceEnabled()) {
+        LocationPermission permission = await Geolocator.checkPermission();
+        if (permission == LocationPermission.whileInUse || permission == LocationPermission.always) {
+          Position position = await Geolocator.getCurrentPosition(
+            locationSettings: const LocationSettings(accuracy: LocationAccuracy.medium),
+          );
+          lat = position.latitude;
+          lng = position.longitude;
+          address = "${lat.toStringAsFixed(4)}, ${lng.toStringAsFixed(4)}";
+        }
+      }
+    } catch (e) {
+      debugPrint("GPS location check error: $e");
+    }
+
     try {
       Response response;
 
       if (type == MessageType.location) {
-        double lat = _currentPeer.location.latitude;
-        double lng = _currentPeer.location.longitude;
-        String address = "Shared Current GPS Pin";
-
-        try {
-          bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-          if (serviceEnabled) {
-            LocationPermission permission = await Geolocator.checkPermission();
-            if (permission == LocationPermission.denied) {
-              permission = await Geolocator.requestPermission();
-            }
-            if (permission == LocationPermission.whileInUse || permission == LocationPermission.always) {
-              Position position = await Geolocator.getCurrentPosition(
-                locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
-              );
-              lat = position.latitude;
-              lng = position.longitude;
-              address = "\, \";
-            }
-          }
-        } catch (e) {
-          debugPrint("GPS location error: \");
-        }
-
         response = await _apiService.sendLocationMessage(
           _currentPeer.id,
           lat,
@@ -230,12 +326,20 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
         response = await _apiService.sendMessage(_currentPeer.id, {
           'text': text,
           'type': typeStr,
+          'latitude': lat,
+          'longitude': lng,
+          'address': address,
         });
       }
 
       if (response.data != null && response.data is Map<String, dynamic>) {
         final currentUserId = _currentUserId ?? '';
-        final newMsg = ChatMessage.fromJson(response.data as Map<String, dynamic>, currentUserId);
+        final jsonMap = Map<String, dynamic>.from(response.data as Map<String, dynamic>);
+        jsonMap['latitude'] ??= lat;
+        jsonMap['longitude'] ??= lng;
+        jsonMap['address'] ??= address;
+
+        final newMsg = ChatMessage.fromJson(jsonMap, currentUserId);
         setState(() {
           final existingIndex = _messages.indexWhere((m) => m.id == newMsg.id && newMsg.id.isNotEmpty);
           if (existingIndex == -1) {
@@ -305,21 +409,24 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                       icon: Icons.camera_alt_rounded,
                       color: AppTheme.primaryIndigo,
                       label: "Live Camera",
-                      onTap: () async {
+                      onTap: () {
                         Navigator.pop(context);
-                        final String? capturedPhoto = await Navigator.push(
+                        Navigator.push(
                           context,
                           MaterialPageRoute(
-                            builder: (_) => LiveCameraScreen(peer: _currentPeer),
+                            builder: (_) => LiveCameraScreen(
+                              onPhotoCaptured: (capturedPhoto) {
+                                if (capturedPhoto.isNotEmpty) {
+                                  _sendMessage(
+                                    type: MessageType.camera,
+                                    cameraUrl: capturedPhoto,
+                                    customText: "Live Camera Snapshot",
+                                  );
+                                }
+                              },
+                            ),
                           ),
                         );
-                        if (capturedPhoto != null && capturedPhoto.isNotEmpty) {
-                          _sendMessage(
-                            type: MessageType.camera,
-                            cameraUrl: capturedPhoto,
-                            customText: "Live Camera Snapshot",
-                          );
-                        }
                       },
                     ),
                     _buildAttachOption(
@@ -411,7 +518,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                     ),
                     const SizedBox(width: 4),
                     Text(
-                      peer.isOnline ? "Online • Active Channel" : "Offline",
+                      peer.isOnline ? "Online â€¢ Active Channel" : "Offline",
                       style: const TextStyle(fontSize: 10, color: AppTheme.textSecondary),
                     ),
                   ],
@@ -449,6 +556,26 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                 ),
               ).then((_) => _loadConversation());
             },
+          ),
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert),
+            onSelected: (value) {
+              if (value == 'clear') {
+                _confirmClearConversation();
+              }
+            },
+            itemBuilder: (context) => [
+              const PopupMenuItem(
+                value: 'clear',
+                child: Row(
+                  children: [
+                    Icon(Icons.delete_outline, color: AppTheme.statusRed, size: 20),
+                    SizedBox(width: 8),
+                    Text("Clear Messages", style: TextStyle(color: AppTheme.statusRed)),
+                  ],
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -509,7 +636,11 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                               itemBuilder: (context, index) {
                                 final msg = _messages[index];
                                 final isMe = msg.senderId == "user_me" || (_currentUserId != null && msg.senderId == _currentUserId);
-                                return LocationMessageBubble(message: msg, isMe: isMe);
+                                return LocationMessageBubble(
+                                  message: msg,
+                                  isMe: isMe,
+                                  onDelete: () => _confirmDeleteMessage(msg),
+                                );
                               },
                             ),
                     ),

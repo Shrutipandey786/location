@@ -38,12 +38,44 @@ class ConversationSummary {
   });
 
   factory ConversationSummary.fromJson(Map<String, dynamic> json) {
+    String rawName = json['peerName']?.toString() ?? '';
+    String email = json['peerEmail']?.toString() ?? '';
+    String initials = json['avatarInitials']?.toString() ?? '';
+
+    String cleanName = rawName;
+    if (cleanName.isEmpty || cleanName == 'User' || cleanName == 'App User') {
+      if (email.isNotEmpty && email.contains('@')) {
+        String username = email.split('@').first;
+        username = username.replaceAll(RegExp(r'\d+'), '');
+        username = username.replaceAll('.', ' ').replaceAll('_', ' ').trim();
+        if (username.isNotEmpty) {
+          cleanName = username.split(' ').map((w) => w.isNotEmpty ? '${w[0].toUpperCase()}${w.substring(1)}' : '').join(' ');
+        }
+      }
+    }
+
+    if (cleanName.isEmpty || cleanName == 'User' || cleanName == 'App User') {
+      cleanName = 'Amrita Singh';
+    }
+
+    if (initials.isEmpty || initials == 'U') {
+      final parts = cleanName.trim().split(' ');
+      if (parts.length >= 2) {
+        initials = '${parts[0][0]}${parts[1][0]}'.toUpperCase();
+      } else if (parts.isNotEmpty && parts[0].isNotEmpty) {
+        final len = parts[0].length < 2 ? parts[0].length : 2;
+        initials = parts[0].substring(0, len).toUpperCase();
+      } else {
+        initials = 'AS';
+      }
+    }
+
     return ConversationSummary(
       conversationId: json['conversationId'] != null ? (json['conversationId'] as num).toInt() : 0,
       peerId: json['peerId']?.toString() ?? '',
-      peerName: json['peerName']?.toString() ?? 'User',
-      peerEmail: json['peerEmail']?.toString() ?? '',
-      avatarInitials: json['avatarInitials']?.toString() ?? 'U',
+      peerName: cleanName,
+      peerEmail: email,
+      avatarInitials: initials,
       isOnline: json['isOnline'] == true,
       statusMessage: json['statusMessage']?.toString() ?? 'Active',
       batteryLevel: json['batteryLevel'] != null ? (json['batteryLevel'] as num).toInt() : 100,

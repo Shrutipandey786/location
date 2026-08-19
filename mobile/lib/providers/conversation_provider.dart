@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 
 import '../models/conversation_summary.dart';
 import '../services/auth_api_service.dart';
+import '../services/deletion_storage_service.dart';
 
 class ConversationProvider extends ChangeNotifier {
   final AuthApiService _apiService = AuthApiService();
@@ -28,6 +29,7 @@ class ConversationProvider extends ChangeNotifier {
         final listData = response.data as List<dynamic>;
         _conversations = listData
             .map((item) => ConversationSummary.fromJson(item as Map<String, dynamic>))
+            .where((s) => !DeletionStorageService().isPeerCleared(s.peerId))
             .toList();
       } else {
         _conversations = [];
@@ -61,6 +63,7 @@ class ConversationProvider extends ChangeNotifier {
         final listData = response.data as List<dynamic>;
         _conversations = listData
             .map((item) => ConversationSummary.fromJson(item as Map<String, dynamic>))
+            .where((s) => !DeletionStorageService().isPeerCleared(s.peerId))
             .toList();
       } else {
         _conversations = [];
