@@ -3,6 +3,7 @@ import 'package:dio/dio.dart';
 
 import '../models/user.dart';
 import '../services/auth_api_service.dart';
+import '../services/deletion_storage_service.dart';
 
 class AuthProvider extends ChangeNotifier {
   final AuthApiService _apiService = AuthApiService();
@@ -68,6 +69,7 @@ class AuthProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
+      await DeletionStorageService().clearAllLocalDeletions();
       final response = await _apiService.login(
         email: email,
         password: password,
@@ -120,6 +122,7 @@ class AuthProvider extends ChangeNotifier {
 
   Future<void> logout() async {
     try {
+      await DeletionStorageService().clearAllLocalDeletions();
       await _apiService.logout();
     } catch (_) {
       // Ignore network errors during logout

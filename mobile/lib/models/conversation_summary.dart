@@ -1,4 +1,4 @@
-import 'models.dart';
+﻿import 'models.dart';
 
 class ConversationSummary {
   final int conversationId;
@@ -38,11 +38,11 @@ class ConversationSummary {
   });
 
   factory ConversationSummary.fromJson(Map<String, dynamic> json) {
-    String rawName = json['peerName']?.toString() ?? '';
-    String email = json['peerEmail']?.toString() ?? '';
+    String rawName = json['name']?.toString() ?? json['peerName']?.toString() ?? '';
+    String email = json['email']?.toString() ?? json['peerEmail']?.toString() ?? '';
     String initials = json['avatarInitials']?.toString() ?? '';
 
-    String cleanName = rawName;
+    String cleanName = rawName.trim();
     if (cleanName.isEmpty || cleanName == 'User' || cleanName == 'App User') {
       if (email.isNotEmpty && email.contains('@')) {
         String username = email.split('@').first;
@@ -50,33 +50,39 @@ class ConversationSummary {
         username = username.replaceAll('.', ' ').replaceAll('_', ' ').trim();
         if (username.isNotEmpty) {
           cleanName = username.split(' ').map((w) => w.isNotEmpty ? '${w[0].toUpperCase()}${w.substring(1)}' : '').join(' ');
+        } else {
+          cleanName = email.split('@').first;
         }
+      } else if (email.isNotEmpty) {
+        cleanName = email;
+      } else {
+        cleanName = 'Registered User';
       }
     }
 
-    if (cleanName.isEmpty || cleanName == 'User' || cleanName == 'App User') {
-      cleanName = 'Amrita Singh';
-    }
-
     if (initials.isEmpty || initials == 'U') {
-      final parts = cleanName.trim().split(' ');
+      final parts = cleanName.trim().split(RegExp(r'\s+'));
       if (parts.length >= 2) {
-        initials = '${parts[0][0]}${parts[1][0]}'.toUpperCase();
+        initials = '${parts[0][0]}${parts[parts.length - 1][0]}'.toUpperCase();
       } else if (parts.isNotEmpty && parts[0].isNotEmpty) {
         final len = parts[0].length < 2 ? parts[0].length : 2;
         initials = parts[0].substring(0, len).toUpperCase();
       } else {
-        initials = 'AS';
+        initials = 'RU';
       }
     }
 
+    final convId = json['id'] != null ? (json['id'] as num).toInt() : (json['conversationId'] != null ? (json['conversationId'] as num).toInt() : 0);
+    final pId = json['peerId']?.toString() ?? json['id']?.toString() ?? '';
+    final isOnlineVal = json['online'] == true || json['isOnline'] == true;
+
     return ConversationSummary(
-      conversationId: json['conversationId'] != null ? (json['conversationId'] as num).toInt() : 0,
-      peerId: json['peerId']?.toString() ?? '',
+      conversationId: convId,
+      peerId: pId,
       peerName: cleanName,
       peerEmail: email,
       avatarInitials: initials,
-      isOnline: json['isOnline'] == true,
+      isOnline: isOnlineVal,
       statusMessage: json['statusMessage']?.toString() ?? 'Active',
       batteryLevel: json['batteryLevel'] != null ? (json['batteryLevel'] as num).toInt() : 100,
       deviceModel: json['deviceModel']?.toString() ?? 'Android',
@@ -84,9 +90,11 @@ class ConversationSummary {
       longitude: json['longitude'] != null ? (json['longitude'] as num).toDouble() : null,
       address: json['address']?.toString(),
       unreadCount: json['unreadCount'] != null ? (json['unreadCount'] as num).toInt() : 0,
-      lastMessageText: json['lastMessageText']?.toString() ?? '',
+      lastMessageText: json['lastMessageText']?.toString() ?? 'Start conversation',
       lastMessageType: json['lastMessageType']?.toString() ?? 'TEXT',
-      lastMessageTime: json['lastMessageTime'] != null ? DateTime.tryParse(json['lastMessageTime'].toString()) : null,
+      lastMessageTime: json['updatedAt'] != null 
+          ? DateTime.tryParse(json['updatedAt'].toString()) 
+          : (json['lastMessageTime'] != null ? DateTime.tryParse(json['lastMessageTime'].toString()) : null),
     );
   }
 

@@ -134,12 +134,21 @@ class ChatMessage {
       );
     }
 
+    DateTime parsedTime = DateTime.now();
+    if (json['createdAt'] != null) {
+      final str = json['createdAt'].toString();
+      final dt = DateTime.tryParse(str);
+      if (dt != null) {
+        parsedTime = dt.toLocal();
+      }
+    }
+
     return ChatMessage(
       id: json['id']?.toString() ?? '',
       senderId: isMe ? "user_me" : senderIdStr,
       senderName: json['senderName']?.toString() ?? '',
       text: json['text']?.toString() ?? '',
-      timestamp: DateTime.tryParse(json['createdAt']?.toString() ?? '') ?? DateTime.now(),
+      timestamp: parsedTime,
       status: json['isRead'] == true ? MessageStatus.read : MessageStatus.delivered,
       location: locPoint,
       deviceModel: 'Android',
@@ -153,9 +162,10 @@ class ChatMessage {
   }
 
   String get formattedTime {
-    final hour = timestamp.hour > 12 ? timestamp.hour - 12 : (timestamp.hour == 0 ? 12 : timestamp.hour);
-    final minute = timestamp.minute.toString().padLeft(2, '0');
-    final period = timestamp.hour >= 12 ? 'PM' : 'AM';
+    final localDt = timestamp.toLocal();
+    final hour = localDt.hour > 12 ? localDt.hour - 12 : (localDt.hour == 0 ? 12 : localDt.hour);
+    final minute = localDt.minute.toString().padLeft(2, '0');
+    final period = localDt.hour >= 12 ? 'PM' : 'AM';
     return '$hour:$minute $period';
   }
 }

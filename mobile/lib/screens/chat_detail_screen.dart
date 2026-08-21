@@ -1,4 +1,5 @@
-﻿import 'package:dio/dio.dart';
+﻿import 'dart:async';
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:provider/provider.dart';
@@ -31,7 +32,6 @@ class ChatDetailScreen extends StatefulWidget {
 }
 
 class _ChatDetailScreenState extends State<ChatDetailScreen> {
-
   final AuthApiService _apiService = AuthApiService();
   final WebSocketService _webSocketService = WebSocketService();
   late PeerUser _currentPeer;
@@ -39,6 +39,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   bool _isLoading = true;
   String? _errorMessage;
   String? _currentUserId;
+  Timer? _pollTimer;
 
   final TextEditingController _inputController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
@@ -49,6 +50,12 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     _currentPeer = widget.peer;
     _loadConversation();
     _setupWebSocket();
+
+    _pollTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (mounted && !_isLoading) {
+        _fetchNewMessagesSilently();
+      }
+    });
   }
 
   void _setupWebSocket() {
@@ -85,12 +92,64 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
 
   @override
   void dispose() {
+    _pollTimer?.cancel();
     if (_currentUserId != null) {
       _webSocketService.removeMessageListener(_currentUserId!, _onWebSocketMessageReceived);
     }
     _inputController.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+
+  Future<void> _fetchNewMessagesSilently() async {
+    if (_currentUserId == null || _currentUserId!.isEmpty) return;
+    try {
+      final response = await _apiService.getConversationDetail(_currentPeer.id);
+      if (response.data != null && response.data is Map<String, dynamic>) {
+        final data = response.data as Map<String, dynamic>;
+        final peerJson = (data['conversationSummary'] ?? data['peer']) as Map<String, dynamic>?;
+
+        if (peerJson != null) {
+          final lat = peerJson['latitude'] != null ? (peerJson['latitude'] as num).toDouble() : _currentPeer.location.latitude;
+          final lng = peerJson['longitude'] != null ? (peerJson['longitude'] as num).toDouble() : _currentPeer.location.longitude;
+
+          final updatedPeer = PeerUser(
+            id: peerJson['peerId']?.toString() ?? _currentPeer.id,
+            name: peerJson['name']?.toString() ?? peerJson['peerName']?.toString() ?? _currentPeer.name,
+            email: peerJson['email']?.toString() ?? peerJson['peerEmail']?.toString() ?? _currentPeer.email,
+            avatarInitials: peerJson['avatarInitials']?.toString() ?? _currentPeer.avatarInitials,
+            isOnline: peerJson['online'] == true || peerJson['isOnline'] == true,
+            statusMessage: peerJson['statusMessage']?.toString() ?? _currentPeer.statusMessage,
+            batteryLevel: peerJson['batteryLevel'] != null ? (peerJson['batteryLevel'] as num).toInt() : _currentPeer.batteryLevel,
+            deviceModel: peerJson['deviceModel']?.toString() ?? _currentPeer.deviceModel,
+            location: LocationPoint(
+              latitude: lat,
+              longitude: lng,
+              address: peerJson['address']?.toString() ?? _currentPeer.location.address,
+              timestamp: DateTime.now(),
+            ),
+            distanceKm: _currentPeer.distanceKm,
+            lastSeen: DateTime.now(),
+          );
+          _currentPeer = updatedPeer;
+        }
+
+        if (!DeletionStorageService().isPeerCleared(_currentPeer.id)) {
+          final msgsJson = data['messages'] as List<dynamic>? ?? [];
+          final newMsgs = msgsJson
+              .map((m) => ChatMessage.fromJson(m as Map<String, dynamic>, _currentUserId!))
+              .where((m) => !DeletionStorageService().isMessageDeleted(m.id))
+              .toList();
+
+          if (newMsgs.length != _messages.length || (newMsgs.isNotEmpty && _messages.isNotEmpty && newMsgs.last.id != _messages.last.id)) {
+            setState(() {
+              _messages = newMsgs;
+            });
+            _scrollToBottom();
+          }
+        }
+      }
+    } catch (_) {}
   }
 
   Future<void> _loadConversation() async {
@@ -106,18 +165,18 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       final response = await _apiService.getConversationDetail(_currentPeer.id);
       if (response.data != null && response.data is Map<String, dynamic>) {
         final data = response.data as Map<String, dynamic>;
+        final peerJson = (data['conversationSummary'] ?? data['peer']) as Map<String, dynamic>?;
 
-        if (data['peer'] != null && data['peer'] is Map<String, dynamic>) {
-          final peerJson = data['peer'] as Map<String, dynamic>;
+        if (peerJson != null) {
           final lat = peerJson['latitude'] != null ? (peerJson['latitude'] as num).toDouble() : _currentPeer.location.latitude;
           final lng = peerJson['longitude'] != null ? (peerJson['longitude'] as num).toDouble() : _currentPeer.location.longitude;
 
           _currentPeer = PeerUser(
             id: peerJson['peerId']?.toString() ?? _currentPeer.id,
-            name: peerJson['peerName']?.toString() ?? _currentPeer.name,
-            email: peerJson['peerEmail']?.toString() ?? _currentPeer.email,
+            name: peerJson['name']?.toString() ?? peerJson['peerName']?.toString() ?? _currentPeer.name,
+            email: peerJson['email']?.toString() ?? peerJson['peerEmail']?.toString() ?? _currentPeer.email,
             avatarInitials: peerJson['avatarInitials']?.toString() ?? _currentPeer.avatarInitials,
-            isOnline: peerJson['isOnline'] == true,
+            isOnline: peerJson['online'] == true || peerJson['isOnline'] == true,
             statusMessage: peerJson['statusMessage']?.toString() ?? _currentPeer.statusMessage,
             batteryLevel: peerJson['batteryLevel'] != null ? (peerJson['batteryLevel'] as num).toInt() : _currentPeer.batteryLevel,
             deviceModel: peerJson['deviceModel']?.toString() ?? _currentPeer.deviceModel,
@@ -378,74 +437,69 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       builder: (context) {
         return SafeArea(
           child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
+            padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 16),
+            child: Wrap(
+              spacing: 16,
+              runSpacing: 16,
+              alignment: WrapAlignment.spaceAround,
               children: [
-                Container(
-                  width: 40,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: Colors.grey.shade400,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
+                _buildAttachmentOption(
+                  icon: Icons.my_location_rounded,
+                  color: AppTheme.primaryIndigo,
+                  label: "GPS Location",
+                  onTap: () {
+                    Navigator.pop(context);
+                    _sendMessage(type: MessageType.location);
+                  },
                 ),
-                const SizedBox(height: 16),
-                const Text("Attach Content", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                const SizedBox(height: 20),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceAround,
-                  children: [
-                    _buildAttachOption(
-                      icon: Icons.location_on_rounded,
-                      color: AppTheme.statusGreen,
-                      label: "GPS Location",
-                      onTap: () {
-                        Navigator.pop(context);
-                        _sendMessage(type: MessageType.location);
-                      },
-                    ),
-                    _buildAttachOption(
-                      icon: Icons.camera_alt_rounded,
-                      color: AppTheme.primaryIndigo,
-                      label: "Live Camera",
-                      onTap: () {
-                        Navigator.pop(context);
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => LiveCameraScreen(
-                              onPhotoCaptured: (capturedPhoto) {
-                                if (capturedPhoto.isNotEmpty) {
-                                  _sendMessage(
-                                    type: MessageType.camera,
-                                    cameraUrl: capturedPhoto,
-                                    customText: "Live Camera Snapshot",
-                                  );
-                                }
-                              },
-                            ),
-                          ),
+                _buildAttachmentOption(
+                  icon: Icons.camera_alt_rounded,
+                  color: AppTheme.primaryViolet,
+                  label: "Live Camera",
+                  onTap: () {
+                    Navigator.pop(context);
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const LiveCameraScreen(),
+                      ),
+                    ).then((result) {
+                      if (result != null && result is Map<String, dynamic>) {
+                        _sendMessage(
+                          type: MessageType.camera,
+                          cameraUrl: result['imageUrl'],
+                          customText: result['text'] ?? "Live Camera Snapshot",
                         );
-                      },
-                    ),
-                    _buildAttachOption(
-                      icon: Icons.mic_rounded,
-                      color: AppTheme.primaryViolet,
-                      label: "Push-To-Talk",
-                      onTap: () {
-                        Navigator.pop(context);
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => PushToTalkScreen(selectedPeer: _currentPeer),
-                          ),
-                        ).then((_) => _loadConversation());
-                      },
-                    ),
-                  ],
+                      }
+                    });
+                  },
                 ),
-                const SizedBox(height: 12),
+                _buildAttachmentOption(
+                  icon: Icons.mic_rounded,
+                  color: Colors.amber.shade800,
+                  label: "PTT Memo",
+                  onTap: () {
+                    Navigator.pop(context);
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => PushToTalkScreen(selectedPeer: _currentPeer),
+                      ),
+                    ).then((_) => _loadConversation());
+                  },
+                ),
+                _buildAttachmentOption(
+                  icon: Icons.warning_amber_rounded,
+                  color: AppTheme.statusRed,
+                  label: "SOS Alert",
+                  onTap: () {
+                    Navigator.pop(context);
+                    _sendMessage(
+                      customText: "EMERGENCY SOS ALERT: Immediate Assistance Requested!",
+                      type: MessageType.sosAlert,
+                    );
+                  },
+                ),
               ],
             ),
           ),
@@ -454,28 +508,31 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     );
   }
 
-  Widget _buildAttachOption({
+  Widget _buildAttachmentOption({
     required IconData icon,
     required Color color,
     required String label,
     required VoidCallback onTap,
   }) {
-    return InkWell(
+    return GestureDetector(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(16),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          children: [
-            CircleAvatar(
-              radius: 26,
-              backgroundColor: color.withOpacity(0.12),
-              child: Icon(icon, color: color, size: 28),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: color.withOpacity(0.12),
+              shape: BoxShape.circle,
             ),
-            const SizedBox(height: 8),
-            Text(label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
-          ],
-        ),
+            child: Icon(icon, color: color, size: 28),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            label,
+            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
+          ),
+        ],
       ),
     );
   }
@@ -495,35 +552,45 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
               backgroundColor: AppTheme.primaryIndigo.withOpacity(0.2),
               child: Text(
                 peer.avatarInitials,
-                style: const TextStyle(color: AppTheme.primaryIndigo, fontWeight: FontWeight.bold, fontSize: 13),
+                style: const TextStyle(
+                  color: AppTheme.primaryIndigo,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 13,
+                ),
               ),
             ),
             const SizedBox(width: 10),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  peer.name,
-                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
-                ),
-                Row(
-                  children: [
-                    Container(
-                      width: 7,
-                      height: 7,
-                      decoration: BoxDecoration(
-                        color: peer.isOnline ? AppTheme.statusGreen : Colors.grey,
-                        shape: BoxShape.circle,
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    peer.name,
+                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  Row(
+                    children: [
+                      Container(
+                        width: 7,
+                        height: 7,
+                        decoration: BoxDecoration(
+                          color: peer.isOnline ? AppTheme.statusGreen : Colors.grey,
+                          shape: BoxShape.circle,
+                        ),
                       ),
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      peer.isOnline ? "Online â€¢ Active Channel" : "Offline",
-                      style: const TextStyle(fontSize: 10, color: AppTheme.textSecondary),
-                    ),
-                  ],
-                ),
-              ],
+                      const SizedBox(width: 4),
+                      Text(
+                        peer.isOnline ? "Online" : "Offline",
+                        style: const TextStyle(fontSize: 10, color: AppTheme.textSecondary),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ],
         ),
@@ -644,31 +711,6 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                               },
                             ),
                     ),
-                    SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                      child: Row(
-                        children: [
-                          ActionChip(
-                            avatar: const Icon(Icons.check_circle_outline, size: 14, color: AppTheme.primaryIndigo),
-                            label: const Text("I'm here.", style: TextStyle(fontSize: 11)),
-                            onPressed: () => _sendMessage(customText: "I'm here.", type: MessageType.statusPreset),
-                          ),
-                          const SizedBox(width: 6),
-                          ActionChip(
-                            avatar: const Icon(Icons.navigation_outlined, size: 14, color: AppTheme.primaryViolet),
-                            label: const Text("En route", style: TextStyle(fontSize: 11)),
-                            onPressed: () => _sendMessage(customText: "En route to your location.", type: MessageType.statusPreset),
-                          ),
-                          const SizedBox(width: 6),
-                          ActionChip(
-                            avatar: const Icon(Icons.location_city, size: 14, color: AppTheme.accentCyan),
-                            label: const Text("Arrived at checkpoint", style: TextStyle(fontSize: 11)),
-                            onPressed: () => _sendMessage(customText: "Arrived at checkpoint A.", type: MessageType.statusPreset),
-                          ),
-                        ],
-                      ),
-                    ),
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                       decoration: BoxDecoration(
@@ -691,7 +733,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                             child: TextField(
                               controller: _inputController,
                               decoration: InputDecoration(
-                                hintText: "Type message or location tag...",
+                                hintText: "Type message",
                                 contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                                 fillColor: isDark ? AppTheme.darkInput : Colors.grey.shade100,
                               ),
@@ -718,3 +760,4 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     );
   }
 }
+

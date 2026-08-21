@@ -1,4 +1,4 @@
-﻿import { prisma } from '../config/database.js';
+import { prisma } from '../config/database.js';
 import { AuthenticatedUser } from '../middleware/auth.middleware.js';
 import { socketServer } from '../websocket/socket.server.js';
 import fs from 'fs';
@@ -22,14 +22,16 @@ export class ConversationService {
     const results: any[] = [];
 
     for (const conv of conversations) {
-      const peer = conv.user1Id === currentUser.id ? conv.user2 : conv.user1;
-      processedUserIds.add(peer.id.toString());
-      results.push(await this.buildSummaryDto(conv, peer, currentUser));
+      const peer = conv.user1Id.toString() === currentUser.id.toString() ? conv.user2 : conv.user1;
+      if (peer && peer.id.toString() !== currentUser.id.toString()) {
+        processedUserIds.add(peer.id.toString());
+        results.push(await this.buildSummaryDto(conv, peer, currentUser));
+      }
     }
 
     const allUsers = await prisma.user.findMany();
     for (const peer of allUsers) {
-      if (peer.id !== currentUser.id && !processedUserIds.has(peer.id.toString())) {
+      if (peer.id.toString() !== currentUser.id.toString() && !processedUserIds.has(peer.id.toString())) {
         processedUserIds.add(peer.id.toString());
         results.push(await this.buildUserSummaryDto(peer));
       }
@@ -45,20 +47,20 @@ export class ConversationService {
 
     const trimmed = query.trim().toLowerCase();
 
-    const matchingUsers = await prisma.user.findMany({
-      where: {
-        id: { not: currentUser.id },
-        OR: [
-          { name: { contains: trimmed, mode: 'insensitive' } },
-          { email: { contains: trimmed, mode: 'insensitive' } },
-        ],
-      },
+    const allUsers = await prisma.user.findMany();
+    const matchingUsers = allUsers.filter((user) => {
+      if (user.id.toString() === currentUser.id.toString()) return false;
+      const displayName = this.resolveName(user.name, user.email).toLowerCase();
+      const rawName = (user.name || '').toLowerCase();
+      const email = (user.email || '').toLowerCase();
+      return displayName.includes(trimmed) || rawName.includes(trimmed) || email.includes(trimmed);
     });
 
-    const conversationIds = new Set<string>();
+    const processedUserIds = new Set<string>();
     const results: any[] = [];
 
     for (const peer of matchingUsers) {
+      processedUserIds.add(peer.id.toString());
       const conv = await prisma.conversation.findFirst({
         where: {
           OR: [
@@ -70,12 +72,32 @@ export class ConversationService {
       });
 
       if (conv) {
-        if (!conversationIds.has(conv.id.toString())) {
-          conversationIds.add(conv.id.toString());
-          results.push(await this.buildSummaryDto(conv, peer, currentUser));
-        }
+        results.push(await this.buildSummaryDto(conv, peer, currentUser));
       } else {
         results.push(await this.buildUserSummaryDto(peer));
+      }
+    }
+
+    const matchingMessages = await prisma.message.findMany({
+      where: {
+        text: { contains: trimmed, mode: 'insensitive' },
+        conversation: {
+          OR: [{ user1Id: currentUser.id }, { user2Id: currentUser.id }],
+        },
+      },
+      include: {
+        conversation: {
+          include: { user1: true, user2: true },
+        },
+      },
+    });
+
+    for (const msg of matchingMessages) {
+      const conv = msg.conversation;
+      const peer = conv.user1Id.toString() === currentUser.id.toString() ? conv.user2 : conv.user1;
+      if (peer && peer.id.toString() !== currentUser.id.toString() && !processedUserIds.has(peer.id.toString())) {
+        processedUserIds.add(peer.id.toString());
+        results.push(await this.buildSummaryDto(conv, peer, currentUser));
       }
     }
 
@@ -476,13 +498,14 @@ export class ConversationService {
       },
     });
 
-    const initials = this.getAvatarInitials(peer.name);
+    const displayName = this.resolveName(peer.name, peer.email);
+    const initials = this.getAvatarInitials(displayName);
     const timeToFormat = lastMsg?.createdAt || conversation.updatedAt || new Date();
 
     return {
       id: Number(conversation.id),
       peerId: Number(peer.id),
-      name: this.resolveName(peer.name, peer.email),
+      name: displayName,
       email: peer.email || '',
       avatarInitials: initials,
       online: status?.online ?? true,
@@ -509,12 +532,13 @@ export class ConversationService {
       where: { userId: peer.id },
     });
 
-    const initials = this.getAvatarInitials(peer.name);
+    const displayName = this.resolveName(peer.name, peer.email);
+    const initials = this.getAvatarInitials(displayName);
 
     return {
       id: 0,
       peerId: Number(peer.id),
-      name: this.resolveName(peer.name, peer.email),
+      name: displayName,
       email: peer.email || '',
       avatarInitials: initials,
       online: status?.online ?? true,
@@ -551,8 +575,8 @@ export class ConversationService {
     };
   }
 
-    private static resolveName(name?: string, email?: string): string {
-    if (name && name.trim().length > 0 && name.trim() !== 'User' && name.trim() !== 'App User') {
+  private static resolveName(name?: string, email?: string): string {
+    if (name && name.trim().length > 0) {
       return name.trim();
     }
     if (email && email.includes('@')) {
@@ -561,8 +585,12 @@ export class ConversationService {
       if (username.length > 0) {
         return username.split(' ').map(w => w.length > 0 ? w[0].toUpperCase() + w.slice(1) : '').join(' ');
       }
+      return email.split('@')[0];
     }
-    return 'Amrita Singh';
+    if (email && email.trim().length > 0) {
+      return email.trim();
+    }
+    return 'Registered User';
   }
 
   private static getAvatarInitials(name?: string): string {

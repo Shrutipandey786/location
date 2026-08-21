@@ -28,9 +28,22 @@ class DeletionStorageService {
     }
   }
 
-  Future<void> addClearedPeer(String peerId) async {
+  Future<void> clearAllLocalDeletions() async {
+    _clearedPeerIds.clear();
+    _deletedMessageIds.clear();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('cleared_peer_ids');
+      await prefs.remove('deleted_message_ids');
+    } catch (e) {
+      debugPrint("Error clearing local deletions: $e");
+    }
+  }
+
+  Future<void> addClearedPeer(String peerId, [String? currentUserId]) async {
     if (peerId.isEmpty) return;
-    _clearedPeerIds.add(peerId);
+    final key = (currentUserId != null && currentUserId.isNotEmpty) ? "${currentUserId}_$peerId" : peerId;
+    _clearedPeerIds.add(key);
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setStringList('cleared_peer_ids', _clearedPeerIds.toList());
@@ -50,7 +63,10 @@ class DeletionStorageService {
     }
   }
 
-  bool isPeerCleared(String peerId) {
+  bool isPeerCleared(String peerId, [String? currentUserId]) {
+    if (currentUserId != null && currentUserId.isNotEmpty) {
+      return _clearedPeerIds.contains("${currentUserId}_$peerId");
+    }
     return _clearedPeerIds.contains(peerId);
   }
 
